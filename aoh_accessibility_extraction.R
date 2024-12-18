@@ -26,14 +26,14 @@ urban_accessibility <- ee$Image("Oxford/MAP/accessibility_to_cities_2015_v1_0")
 srtm <- ee$Image("CGIAR/SRTM90_V4")
 
 # some input polygon is too big for extraction. to avoid memory issues, split into 5x5 degree grids 
-# Define the grid size (e.g., 1 degree grid or 10km grid in meters)
+# Define the grid size (e.g., 5 degree grid)
 grid_size <- 5  # Adjust the grid size to control chunk size (degrees for EPSG:4326)
 
 # # Check the split polygons
 # plot(split_polygons, col = "lightblue", border = "white")
 
 #AOH.list <- tibble()
-for (i in (337:length(species.list))) {
+for (i in (1:length(species.list))) {
   # read species shapefile 
   spp <-  st_read(paste0("./data/trade_amphi/",species.list[i]))
   
@@ -119,9 +119,8 @@ for (i in (337:length(species.list))) {
 # AOH.list.first <- read_rds("./results/AOH_up_tp_45.rds") %>% distinct() %>% mutate(i = row_number(.), ii = 0)
 # AOH.list.full = rbind(AOH.list.first, AOH.list %>% distinct())
 
-
-
 # now calculate overall mean and stddev access for each species 
+# from split polygon to overall polygon
 stats <- AOH.list %>% 
   group_by(sci_name) %>% 
   summarise(
