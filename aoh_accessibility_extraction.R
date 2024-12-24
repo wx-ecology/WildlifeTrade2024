@@ -15,8 +15,13 @@ ee_Initialize()
 ee_check()
 
 # read data 
-species.list <- list.files("./data/trade_amphi", pattern = ".shp")
+species.list <- list.files("./data/trade_rep", pattern = ".shp")
 
+spp.info <- read_csv("./data/GEE_data/rep-elevationandland.csv")
+
+# for NA elevations, set lower limit to 0 and upper to 6000
+spp.info <- spp.info %>% mutate(ElevationLower.limit = ifelse(is.na(ElevationLower.limit), 0, ElevationLower.limit),
+                                ElevationUpper.limit = ifelse(is.na(ElevationUpper.limit), 6000, ElevationUpper.limit))
 
 # get land use data
 landuse <- ee$ImageCollection('ESA/WorldCover/v200')$first()
@@ -32,10 +37,31 @@ grid_size <- 5  # Adjust the grid size to control chunk size (degrees for EPSG:4
 # # Check the split polygons
 # plot(split_polygons, col = "lightblue", border = "white")
 
+
+
 #AOH.list <- tibble()
-for (i in (1:length(species.list))) {
+for (i in (370:length(species.list))) {
   # read species shapefile 
-  spp <-  st_read(paste0("./data/trade_amphi/",species.list[i]))
+  spp <-  st_read(paste0("./data/trade_rep/",species.list[i]))
+  spp <- st_simplify(spp, dTolerance = 0.001)
+  
+  ele.upper <- spp.info %>% filter(IUCN_Species == unique(spp$sci_name)) %>% pull(ElevationUpper.limit)
+  ele.lower <- spp.info %>% filter(IUCN_Species == unique(spp$sci_name)) %>% pull(ElevationLower.limit)
+  land_use_type <- as.numeric(spp.info %>% filter(IUCN_Species == unique(spp$sci_name)) %>% 
+    select(-ElevationUpper.limit, -ElevationLower.limit) %>% 
+    pivot_longer(3:10) %>% filter(value == 1) %>% pull(name))
+  if (length(land_use_type) == 0) {
+    AOH.spp.i = tibble(i = i,
+                        ii = 0,
+                        id_no = spp$id_no, sci_name = spp$sci_name, 
+                        AOH_count = NA,
+                        mean_access = NA,
+                        stddev_access = NA)
+    
+    AOH.list = rbind(AOH.list, AOH.spp.i)
+    
+    next
+  }
   
   # Create a grid over the bounding box of the polygon
   grid <- st_make_grid(spp, cellsize = grid_size, what = "polygons")
@@ -48,20 +74,29 @@ for (i in (1:length(species.list))) {
     # turn to gee file 
     spp_ee <- sf_as_ee(split_spp[ii])
     # convert to raster to have every pixel with an initial value of 0
-    spp_r <- ee$Image$constant(0)$clip(spp_ee)$reproject(
+    spp_r <- ee$Image$constant(1)$clip(spp_ee)$reproject(
       crs = "EPSG:4326",
       scale = 1000
     )
     
     # ---- land use ---- #
-    # Create a mask for land cover values 90, 40, or 10
-    landcover_mask <- landuse$eq(90)$Or(landuse$eq(40))$Or(landuse$eq(10))
-    # Update spp.r where the mask is true
-    spp_r <- spp_r$where(landcover_mask, 1)
+    # Create a mask for corresponding land cover values 
+    #landcover_mask <- landuse$inList(land_use_type)
+    if (length(land_use_type) == 1) {
+      landcover_mask <- landuse$eq(land_use_type)
+    } else{
+      landcover_mask <- landuse$remap(
+        from = land_use_type,   # Original values to remap
+        to = rep(1, length(land_use_type)) # Map them to 1
+      )$eq(1)
+    }
+
+    # Apply the mask to the land use image
+    spp_r <- spp_r$updateMask(landcover_mask)
     
     # ---- DEM --- #
     # Create a mask for elevation between 0 and 1700
-    elevation_mask <- srtm$gte(0)$And(srtm$lte(1700))
+    elevation_mask <- srtm$gte(ele.lower)$And(srtm$lte(ele.upper))
     # Update spp.r: keep only pixels where elevation mask is true
     spp_r <- spp_r$updateMask(elevation_mask)
     
@@ -116,8 +151,6 @@ for (i in (1:length(species.list))) {
   AOH.list = rbind(AOH.list, AOH.spp.i)
 }
 
-# AOH.list.first <- read_rds("./results/AOH_up_tp_45.rds") %>% distinct() %>% mutate(i = row_number(.), ii = 0)
-# AOH.list.full = rbind(AOH.list.first, AOH.list %>% distinct())
 
 # now calculate overall mean and stddev access for each species 
 # from split polygon to overall polygon
@@ -125,13 +158,13 @@ stats <- AOH.list %>%
   group_by(sci_name) %>% 
   summarise(
     # Step 1: Weighted mean
-    spp_access_mean = sum(AOH_count * mean_access) / sum(AOH_count),
+    spp_access_mean = sum(AOH_count * mean_access, na.rm = TRUE) / sum(AOH_count, na.rm = TRUE),
     
     # Step 2: Within-group variance
-    within_var = sum((AOH_count - 1) * stddev_access^2) / (sum(AOH_count) - n()),
+    within_var = sum((AOH_count - 1) * stddev_access^2, na.rm = TRUE) / (sum(AOH_count, na.rm = TRUE) - n()),
     
     # Step 3: Between-group variance
-    between_var = sum(AOH_count * (mean_access - (sum(AOH_count * mean_access) / sum(AOH_count)))^2) / sum(AOH_count),
+    between_var = sum(AOH_count * (mean_access - (sum(AOH_count * mean_access, na.rm = TRUE) / sum(AOH_count, na.rm = TRUE)))^2, na.rm = TRUE) / sum(AOH_count, na.rm = TRUE),
     
     # Step 4: Population variance
     spp_access_var = within_var + between_var,
@@ -140,9 +173,9 @@ stats <- AOH.list %>%
     spp_access_sd = sqrt(spp_access_var),
     
     # Total sample size
-    total_AOH_count = sum(AOH_count),
+    total_AOH_count = sum(AOH_count, na.rm = TRUE),
     .groups = "drop"
   )
 
-write_rds(AOH.list, "./results/AOH_amphi_allspp.rds")
-write_csv(stats %>% dplyr::select(sci_name, total_AOH_count, spp_access_mean, spp_access_var), "./results/trade_amphi_results.csv")
+write_rds(AOH.list, "./results/AOH_rep_allspp.rds")
+write_csv(stats %>% dplyr::select(sci_name, total_AOH_count, spp_access_mean, spp_access_var), "./results/trade_rep_results.csv")
